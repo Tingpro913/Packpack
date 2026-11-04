@@ -10,6 +10,7 @@ import {
   updateChecklist,
   deleteChecklist,
   getChecklistItems,
+  getAllChecklistItems,
   addChecklistItem,
   updateChecklistItem,
   deleteChecklistItem,
@@ -138,6 +139,10 @@ export async function fetchItems(checklistId: string): Promise<ChecklistItem[]> 
   return getChecklistItems(checklistId);
 }
 
+export async function fetchAllItems(): Promise<ChecklistItem[]> {
+  return getAllChecklistItems();
+}
+
 export async function modifyItem(item: ChecklistItem): Promise<void> {
   await updateChecklistItem(item);
 }
@@ -256,7 +261,8 @@ export async function createBag(
   checklistId: string,
   name: string,
   icon: string = '🧳',
-  color?: string
+  color?: string,
+  iconImage?: string,
 ): Promise<Bag> {
   const existingBags = await getBags(checklistId);
   const now = Date.now();
@@ -265,6 +271,7 @@ export async function createBag(
     checklistId,
     name,
     icon,
+    iconImage,
     order: existingBags.length,
     color,
     createdAt: now,

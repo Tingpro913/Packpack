@@ -2,47 +2,158 @@ import { useMemo } from 'react';
 import { useChecklists } from '../hooks/useChecklists';
 import Card from '../components/ui/Card';
 import { useI18n } from '../contexts/I18nContext';
-import { getTranslatedTemplateName } from '../i18n/contentTranslations';
+import { getTranslatedTemplateName, getTranslatedCategory } from '../i18n/contentTranslations';
+import type { ChecklistItem } from '../types';
 
 function Stats() {
-  const { checklists, loading } = useChecklists();
+  const { checklists, allItems, loading } = useChecklists();
   const { t, lang } = useI18n();
 
+  // Calculate per-checklist progress from real items
+  const checklistProgressMap = useMemo(() => {
+    const map: Record<string, { total: number; packed: number; percentage: number }> = {};
+    const itemsByChecklist: Record<string, ChecklistItem[]> = {};
+    
+    allItems.forEach(item => {
+      if (!itemsByChecklist[item.checklistId]) {
+        itemsByChecklist[item.checklistId] = [];
+      }
+      itemsByChecklist[item.checklistId].push(item);
+    });
+    
+    Object.entries(itemsByChecklist).forEach(([checklistId, items]) => {
+      const packed = items.filter(i => i.packed).length;
+      const total = items.length;
+      map[checklistId] = {
+        total,
+        packed,
+        percentage: total > 0 ? Math.round((packed / total) * 100) : 0,
+      };
+    });
+    
+    return map;
+  }, [allItems]);
+
+  // Top stats cards
   const stats = useMemo(() => {
     const activeChecklists = checklists.filter(c => !c.isArchived);
-    const completedChecklists = checklists.filter(c => c.isArchived);
+    // Completed = checklists with 100% progress (not necessarily archived)
+    const completedChecklists = checklists.filter(c => {
+      const progress = checklistProgressMap[c.id];
+      return progress && progress.percentage === 100 && progress.total > 0;
+    });
+    
+    // Count unique categories from active checklists
+    const categoryIds = new Set<string>();
+    allItems.forEach(item => {
+      // Only count items in active (non-archived) checklists
+      const checklist = checklists.find(c => c.id === item.checklistId);
+      if (checklist && !checklist.isArchived) {
+        categoryIds.add(item.categoryId);
+      }
+    });
+    
     return {
       totalChecklists: checklists.length,
       activeChecklists: activeChecklists.length,
       completedChecklists: completedChecklists.length,
-      totalCategories: new Set(checklists.map(c => c.category)).size,
+      totalCategories: categoryIds.size,
     };
-  }, [checklists]);
+  }, [checklists, allItems, checklistProgressMap]);
 
-  const checklistStats = useMemo(() => {
+  // Overall progress across all active checklists
+  const overallProgress = useMemo(() => {
+    const activeChecklistIds = new Set(
+      checklists.filter(c => !c.isArchived).map(c => c.id)
+    );
+    const activeItems = allItems.filter(i => activeChecklistIds.has(i.checklistId));
+    if (activeItems.length === 0) return { percentage: 0, packed: 0, remaining: 0, total: 0 };
+    
+    const packed = activeItems.filter(i => i.packed).length;
+    return {
+      percentage: Math.round((packed / activeItems.length) * 100),
+      packed,
+      remaining: activeItems.length - packed,
+      total: activeItems.length,
+    };
+  }, [checklists, allItems]);
+
+  // Category distribution (count items by category across all active checklists)
+  const categoryDistribution = useMemo(() => {
+    const activeChecklistIds = new Set(
+      checklists.filter(c => !c.isArchived).map(c => c.id)
+    );
+    const catCount: Record<string, number> = {};
+    
+    allItems.forEach(item => {
+      if (!activeChecklistIds.has(item.checklistId)) return;
+      const catId = item.categoryId;
+      catCount[catId] = (catCount[catId] || 0) + item.quantity;
+    });
+    
+    // Sort by count descending, take top 6
+    const sorted = Object.entries(catCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+    
+    const colors = ['#4F6EF5', '#22c55e', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
+    
+    return sorted.map(([catId, count], index) => ({
+      id: catId,
+      name: getTranslatedCategory(catId, lang),
+      count,
+      color: colors[index % colors.length],
+    }));
+  }, [checklists, allItems, lang]);
+
+  const maxCatCount = Math.max(...categoryDistribution.map(c => c.count), 1);
+
+  // Recent checklists with real progress
+  const recentChecklists = useMemo(() => {
     return checklists
       .filter(c => !c.isArchived)
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-      .slice(0, 5);
-  }, [checklists]);
+      .slice(0, 5)
+      .map(checklist => {
+        const progress = checklistProgressMap[checklist.id] || { percentage: 0, total: 0, packed: 0 };
+        return {
+          ...checklist,
+          progress: progress.percentage,
+        };
+      });
+  }, [checklists, checklistProgressMap]);
 
-  const categoryDistribution = [
-    { name: t.stats.complete === '完成度' ? '衣物' : 'Clothing', count: 12, color: '#4F6EF5' },
-    { name: t.stats.complete === '完成度' ? '洗漱用品' : 'Toiletries', count: 8, color: '#22c55e' },
-    { name: t.stats.complete === '完成度' ? '电子设备' : 'Electronics', count: 6, color: '#f59e0b' },
-    { name: t.stats.complete === '完成度' ? '证件' : 'Documents', count: 4, color: '#ec4899' },
-    { name: t.stats.complete === '完成度' ? '其他' : 'Other', count: 5, color: '#8b5cf6' },
-  ];
+  // Achievements based on real data
+  const achievements = useMemo(() => {
+    const activeChecklistIds = new Set(
+      checklists.filter(c => !c.isArchived).map(c => c.id)
+    );
+    const activeItems = allItems.filter(i => activeChecklistIds.has(i.checklistId));
+    const totalItems = activeItems.reduce((sum, i) => sum + i.quantity, 0);
+    const packedItems = activeItems.filter(i => i.packed).reduce((sum, i) => sum + i.quantity, 0);
+    
+    // Find the fastest completed checklist (most items packed in shortest time)
+    // For now just check if any checklist is 100% packed
+    const hasCompletedList = checklists.some(c => {
+      const progress = checklistProgressMap[c.id];
+      return progress && progress.percentage === 100 && progress.total > 0;
+    });
+    
+    return [
+      { icon: '🌱', label: t.stats.badgeFirstList, unlocked: checklists.length > 0 },
+      { icon: '📦', label: t.stats.badge10Items, unlocked: totalItems >= 10 },
+      { icon: '🎯', label: t.stats.badge100Packed, unlocked: packedItems >= 100 },
+      { icon: '⚡', label: t.stats.badgeSpeed, unlocked: hasCompletedList },
+    ];
+  }, [checklists, allItems, checklistProgressMap, t.stats]);
 
-  const maxCatCount = Math.max(...categoryDistribution.map(c => c.count), 1);
-  const overallProgress = checklists.length > 0 ? 35 : 0;
   const circumference = 2 * Math.PI * 45;
-  const strokeDashoffset = circumference - (overallProgress / 100) * circumference;
+  const strokeDashoffset = circumference - (overallProgress.percentage / 100) * circumference;
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="text-gray-400">{t.stats.complete === '完成度' ? '加载中...' : 'Loading stats...'}</div>
+        <div className="text-gray-400">{t.stats.loading}</div>
       </div>
     );
   }
@@ -78,7 +189,7 @@ function Stats() {
               />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-2xl font-bold text-gray-900">{overallProgress}%</span>
+              <span className="text-2xl font-bold text-gray-900">{overallProgress.percentage}%</span>
               <span className="text-xs text-gray-500">{t.stats.complete}</span>
             </div>
           </div>
@@ -88,11 +199,11 @@ function Stats() {
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-600">{t.stats.packedItems}</span>
-                <span className="font-semibold text-gray-900">{Math.round(overallProgress * 0.8)}</span>
+                <span className="font-semibold text-gray-900">{overallProgress.packed}</span>
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-600">{t.stats.remaining}</span>
-                <span className="font-semibold text-gray-900">{Math.round(overallProgress * 0.2)}</span>
+                <span className="font-semibold text-gray-900">{overallProgress.remaining}</span>
               </div>
             </div>
           </div>
@@ -102,41 +213,47 @@ function Stats() {
       {/* Category Distribution */}
       <Card className="p-6 mb-6">
         <h3 className="text-lg font-bold text-gray-900 mb-4">{t.stats.itemsByCategory}</h3>
-        <div className="space-y-3">
-          {categoryDistribution.map((cat, index) => (
-            <div key={cat.name} className="flex items-center gap-3">
-              <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
-              <span className="text-sm text-gray-700 w-24 flex-shrink-0">{cat.name}</span>
-              <div className="flex-1 h-6 bg-surface-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-700 ease-out"
-                  style={{ width: `${(cat.count / maxCatCount) * 100}%`, backgroundColor: cat.color, transitionDelay: `${index * 100}ms` }}
-                />
+        {categoryDistribution.length === 0 ? (
+          <div className="text-center py-6">
+            <p className="text-gray-400 text-sm">{t.stats.emptyTip}</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {categoryDistribution.map((cat, index) => (
+              <div key={cat.id} className="flex items-center gap-3">
+                <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
+                <span className="text-sm text-gray-700 w-24 flex-shrink-0 truncate">{cat.name}</span>
+                <div className="flex-1 h-6 bg-surface-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-700 ease-out"
+                    style={{ width: `${(cat.count / maxCatCount) * 100}%`, backgroundColor: cat.color, transitionDelay: `${index * 100}ms` }}
+                  />
+                </div>
+                <span className="text-sm font-semibold text-gray-900 w-8 text-right">{cat.count}</span>
               </div>
-              <span className="text-sm font-semibold text-gray-900 w-8 text-right">{cat.count}</span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {/* Recent Checklists Progress */}
       <div className="mb-6">
         <h3 className="text-lg font-bold text-gray-900 mb-4">{t.stats.recentLists}</h3>
-        {checklistStats.length === 0 ? (
+        {recentChecklists.length === 0 ? (
           <Card className="p-8 text-center">
             <div className="text-4xl mb-3">📊</div>
             <p className="text-gray-500 text-sm">{t.stats.emptyTip}</p>
           </Card>
         ) : (
           <div className="space-y-3">
-            {checklistStats.map((checklist, index) => (
+            {recentChecklists.map((checklist, index) => (
               <ChecklistProgressRow
                 key={checklist.id}
                 title={checklist.titleUserModified === false && checklist.templateOriginName
                   ? getTranslatedTemplateName(checklist.templateOriginName, lang)
                   : checklist.title}
                 icon={checklist.icon}
-                percentage={Math.min(index * 25 + 10, 100)}
+                percentage={checklist.progress}
                 delay={index * 100}
               />
             ))}
@@ -154,12 +271,7 @@ function Stats() {
           </div>
         </div>
         <div className="grid grid-cols-4 gap-3">
-          {[
-            { icon: '🌱', label: t.stats.badgeFirstList, unlocked: checklists.length > 0 },
-            { icon: '📦', label: t.stats.badge10Items, unlocked: true },
-            { icon: '🎯', label: t.stats.badge100Packed, unlocked: false },
-            { icon: '⚡', label: t.stats.badgeSpeed, unlocked: false },
-          ].map((badge) => (
+          {achievements.map((badge) => (
             <div
               key={badge.label}
               className={`aspect-square rounded-2xl flex flex-col items-center justify-center gap-1 transition-all ${
@@ -167,7 +279,7 @@ function Stats() {
               }`}
             >
               <span className="text-2xl">{badge.icon}</span>
-              <span className="text-xs font-medium text-gray-600">{badge.label}</span>
+              <span className="text-xs font-medium text-gray-600 text-center px-1">{badge.label}</span>
             </div>
           ))}
         </div>

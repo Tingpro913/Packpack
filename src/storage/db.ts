@@ -204,6 +204,11 @@ export async function getChecklistItems(checklistId: string): Promise<ChecklistI
   return db.getAllFromIndex('checklistItems', 'by-checklistId', checklistId);
 }
 
+export async function getAllChecklistItems(): Promise<ChecklistItem[]> {
+  const db = await getDB();
+  return db.getAll('checklistItems');
+}
+
 export async function updateChecklistItem(item: ChecklistItem): Promise<string> {
   const db = await getDB();
   return db.put('checklistItems', { ...item, updatedAt: Date.now() });

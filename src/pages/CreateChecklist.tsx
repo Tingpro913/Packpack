@@ -1,9 +1,11 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useCreateChecklist } from '../hooks/useChecklists';
 import { generateTravelChecklist, quickTemplates } from '../data/templates/travel';
+import type { QuickTemplate } from '../data/templates/travel';
+import { travelTemplates } from '../data/templates/travelScenarios';
 import { defaultTemplates } from '../data/templates/defaultTemplates';
-import type { TripDuration, TripType, ClimateType, CompanionType, ChecklistCategory } from '../types';
+import type { TripDuration, TripType, ClimateType, CompanionType, ChecklistCategory, Template } from '../types';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
 import { useI18n } from '../contexts/I18nContext';
@@ -13,10 +15,48 @@ type CreateStep = 'select-scenario' | 'travel-form' | 'custom-form';
 
 function CreateChecklist() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { createFromTemplate, loading } = useCreateChecklist();
   const { t, lang } = useI18n();
   
   const [step, setStep] = useState<CreateStep>('select-scenario');
+  const [creatingFromTemplate, setCreatingFromTemplate] = useState(false);
+  const hasCreatedRef = useRef(false);
+  
+  // Auto-create from template if URL has ?template=xxx
+  useEffect(() => {
+    const templateId = searchParams.get('template');
+    if (templateId && !creatingFromTemplate && !hasCreatedRef.current) {
+      // Find template in travelTemplates or defaultTemplates
+      const allTemplates = [...travelTemplates, ...defaultTemplates];
+      const template = allTemplates.find(t => t.id === templateId);
+      if (template) {
+        hasCreatedRef.current = true;
+        createFromListTemplate(template);
+      }
+    }
+  }, [searchParams, creatingFromTemplate]);
+  
+  // Create from Lists page template directly
+  const createFromListTemplate = async (template: Template) => {
+    setCreatingFromTemplate(true);
+    try {
+      const checklist = await createFromTemplate(
+        template.name,
+        template.category,
+        template.icon,
+        template.items,
+        {
+          templateOriginName: template.name,
+          titleUserModified: false,
+        }
+      );
+      navigate(`/checklist/${checklist.id}`, { replace: true });
+    } catch (error) {
+      console.error('Failed to create checklist from template:', error);
+      setCreatingFromTemplate(false);
+    }
+  };
   
   // Travel form state
   const [destination, setDestination] = useState('');
@@ -110,6 +150,34 @@ function CreateChecklist() {
     }
   };
 
+  // Create from quick template directly
+  const createFromQuickTemplate = async (template: QuickTemplate) => {
+    const items = generateTravelChecklist(template.options);
+    
+    const title = getTranslatedTemplateName(template.name, lang);
+    const icon = template.icon;
+    
+    try {
+      const checklist = await createFromTemplate(
+        title,
+        'travel',
+        icon,
+        items,
+        {
+          tripDuration: template.options.duration,
+          tripType: template.options.tripType,
+          climate: template.options.climate,
+          companions: template.options.companions,
+          templateOriginName: template.name,
+          titleUserModified: false,
+        }
+      );
+      navigate(`/checklist/${checklist.id}`);
+    } catch (error) {
+      console.error('Failed to create checklist from template:', error);
+    }
+  };
+
   // Create travel checklist
   const handleCreateTravel = async () => {
     const items = generateTravelChecklist({
@@ -174,6 +242,18 @@ function CreateChecklist() {
 
   return (
     <div className="min-h-screen bg-surface-50">
+      {/* Loading state when creating from template */}
+      {creatingFromTemplate && (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-4xl mb-4 animate-bounce">📋</div>
+            <p className="text-gray-500">{lang === 'zh' ? '正在创建清单...' : 'Creating your checklist...'}</p>
+          </div>
+        </div>
+      )}
+      
+      {!creatingFromTemplate && (
+        <>
       {/* Header */}
       <div className="sticky top-0 bg-surface-50/95 backdrop-blur-sm z-10 px-4 py-4 border-b border-surface-100">
         <div className="flex items-center gap-3">
@@ -195,7 +275,15 @@ function CreateChecklist() {
       {/* Content */}
       <div className="px-4 py-6 pb-32">
         {step === 'select-scenario' && (
-          <ScenarioSelection scenarios={scenarios} onSelect={handleSelectScenario} quickTemplatesHint={t.create.quickTemplates} lang={lang} whatFor={t.create.whatFor} />
+          <ScenarioSelection 
+            scenarios={scenarios} 
+            onSelect={handleSelectScenario} 
+            quickTemplatesHint={t.create.quickTemplates} 
+            lang={lang} 
+            whatFor={t.create.whatFor}
+            quickTemplates={quickTemplates}
+            onQuickTemplateSelect={createFromQuickTemplate}
+          />
         )}
         
         {step === 'travel-form' && (
@@ -246,6 +334,8 @@ function CreateChecklist() {
           </div>
         </div>
       )}
+        </>
+      )}
     </div>
   );
 }
@@ -259,9 +349,19 @@ interface ScenarioSelectionProps {
   onSelect: (category: ChecklistCategory) => void;
   quickTemplatesHint: string;
   lang: string;
+  quickTemplates: QuickTemplate[];
+  onQuickTemplateSelect: (template: QuickTemplate) => void;
 }
 
-function ScenarioSelection({ scenarios, onSelect, quickTemplatesHint, lang, whatFor }: ScenarioSelectionProps & { whatFor: string }) {
+function ScenarioSelection({ scenarios, onSelect, quickTemplatesHint, lang, whatFor, quickTemplates, onQuickTemplateSelect }: ScenarioSelectionProps & { whatFor: string }) {
+  const [creatingTemplateId, setCreatingTemplateId] = useState<string | null>(null);
+  
+  const handleTemplateClick = async (template: QuickTemplate) => {
+    setCreatingTemplateId(template.id);
+    await onQuickTemplateSelect(template);
+    setCreatingTemplateId(null);
+  };
+  
   return (
     <div>
       <p className="text-gray-500 mb-6">{whatFor}</p>
@@ -286,7 +386,7 @@ function ScenarioSelection({ scenarios, onSelect, quickTemplatesHint, lang, what
         ))}
       </div>
       
-      {/* Quick templates hint */}
+      {/* Quick templates */}
       <div className="mt-8">
         <p className="text-sm font-semibold text-gray-500 mb-3 px-1">
           {quickTemplatesHint}
@@ -295,8 +395,11 @@ function ScenarioSelection({ scenarios, onSelect, quickTemplatesHint, lang, what
           {quickTemplates.map(template => (
             <button
               key={template.id}
-              onClick={() => onSelect('travel')}
-              className="flex-shrink-0 bg-white rounded-xl px-4 py-3 border border-surface-200 hover:border-primary-300 transition-colors"
+              onClick={() => handleTemplateClick(template)}
+              disabled={creatingTemplateId !== null}
+              className={`flex-shrink-0 bg-white rounded-xl px-4 py-3 border border-surface-200 hover:border-primary-300 transition-all text-left ${
+                creatingTemplateId === template.id ? 'opacity-50' : ''
+              }`}
             >
               <div className="text-2xl mb-1">{template.icon}</div>
               <div className="text-xs font-medium text-gray-700 whitespace-nowrap">

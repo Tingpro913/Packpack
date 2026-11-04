@@ -8,6 +8,7 @@ import {
   fetchAllChecklists,
   fetchChecklist,
   fetchItems,
+  fetchAllItems,
   createChecklistFromTemplateItems as serviceCreateFromTemplate,
   removeChecklist,
   createItem,
@@ -29,6 +30,7 @@ import type { TemplateItem, ChecklistCategory } from '../types';
 
 export function useChecklists() {
   const [checklists, setChecklists] = useState<Checklist[]>([]);
+  const [allItems, setAllItems] = useState<ChecklistItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,8 +38,12 @@ export function useChecklists() {
     try {
       setLoading(true);
       setError(null);
-      const data = await fetchAllChecklists();
-      setChecklists(data);
+      const [checklistsData, itemsData] = await Promise.all([
+        fetchAllChecklists(),
+        fetchAllItems(),
+      ]);
+      setChecklists(checklistsData);
+      setAllItems(itemsData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load checklists');
     } finally {
@@ -64,6 +70,7 @@ export function useChecklists() {
 
   return {
     checklists,
+    allItems,
     loading,
     error,
     refresh: loadChecklists,
@@ -80,6 +87,7 @@ export function useChecklist(id: string | undefined) {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [items, setItems] = useState<ChecklistItem[]>([]);
   const [bags, setBags] = useState<Bag[]>([]);
+  const [allHistoryItems, setAllHistoryItems] = useState<ChecklistItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,15 +98,26 @@ export function useChecklist(id: string | undefined) {
       setLoading(true);
       setError(null);
       
-      const [checklistData, itemsData, bagsData] = await Promise.all([
+      const [checklistData, itemsData, bagsData, allChecklists] = await Promise.all([
         fetchChecklist(id),
         fetchItems(id),
         fetchBags(id),
+        fetchAllChecklists(),
       ]);
       
       setChecklist(checklistData || null);
       setItems(itemsData);
       setBags(bagsData);
+      
+      // Load items from all other checklists for recommendations
+      const otherChecklistIds = allChecklists
+        .filter(c => c.id !== id)
+        .map(c => c.id);
+      
+      const historyItemPromises = otherChecklistIds.map(cid => fetchItems(cid));
+      const historyItemArrays = await Promise.all(historyItemPromises);
+      setAllHistoryItems(historyItemArrays.flat());
+      
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load checklist');
     } finally {
@@ -137,9 +156,9 @@ export function useChecklist(id: string | undefined) {
   // Bag operations
   // ============================================
 
-  const addBag = useCallback(async (name: string, icon: string = '🧳', color?: string) => {
+  const addBag = useCallback(async (name: string, icon: string = '🧳', color?: string, iconImage?: string) => {
     if (!id) return;
-    const newBag = await serviceCreateBag(id, name, icon, color);
+    const newBag = await serviceCreateBag(id, name, icon, color, iconImage);
     setBags(prev => [...prev, newBag]);
     return newBag;
   }, [id]);
@@ -176,6 +195,7 @@ export function useChecklist(id: string | undefined) {
     checklist,
     items,
     bags,
+    allHistoryItems,
     loading,
     error,
     refresh: loadChecklist,

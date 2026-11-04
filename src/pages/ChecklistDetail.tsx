@@ -15,7 +15,7 @@ import type { ChecklistItem, Bag } from '../types';
 function ChecklistDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { checklist, items, bags, loading, addItem, updateItem, deleteItem, togglePacked, addBag, updateBag, deleteBag, assignItemToBag, updateChecklist } = useChecklist(id);
+  const { checklist, items, bags, allHistoryItems, loading, addItem, updateItem, deleteItem, togglePacked, addBag, updateBag, deleteBag, assignItemToBag, updateChecklist } = useChecklist(id);
   const { t, lang } = useI18n();
   
   const [showAddItem, setShowAddItem] = useState(false);
@@ -33,6 +33,9 @@ function ChecklistDetail() {
   const [editingBag, setEditingBag] = useState<Bag | null>(null);
   const [newBagName, setNewBagName] = useState('');
   const [newBagIcon, setNewBagIcon] = useState('🧳');
+  const [newBagIconImage, setNewBagIconImage] = useState<string | undefined>(undefined);
+  const [viewingBag, setViewingBag] = useState<Bag | null>(null);
+  const [movingItem, setMovingItem] = useState<ChecklistItem | null>(null);
   const [assigningItem, setAssigningItem] = useState<ChecklistItem | null>(null);
   const [confirmDeleteBag, setConfirmDeleteBag] = useState<Bag | null>(null);
   // Edit date state
@@ -47,6 +50,12 @@ function ChecklistDetail() {
   // Drag & Drop states
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [dragOverBagId, setDragOverBagId] = useState<string | null>(null);
+  // Mobile touch drag states
+  const [touchDragging, setTouchDragging] = useState(false);
+  const [touchDragItemId, setTouchDragItemId] = useState<string | null>(null);
+  const [touchDragPos, setTouchDragPos] = useState({ x: 0, y: 0 });
+  const touchDragItemRef = useRef<ChecklistItem | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Share sheet
   const [showShareSheet, setShowShareSheet] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -345,45 +354,85 @@ function ChecklistDetail() {
     setEditingDate(true);
   };
 
-  // Final check items (last-minute essentials)
-  const finalCheckItems = [
-    { id: 'passport', label: t.detail.fcPassport, icon: '📄' },
-    { id: 'phone', label: t.detail.fcPhone, icon: '📱' },
-    { id: 'wallet', label: t.detail.fcWallet, icon: '💳' },
-    { id: 'keys', label: t.detail.fcKeys, icon: '🔑' },
-    { id: 'tickets', label: t.detail.fcTickets, icon: '✈️' },
-    { id: 'meds', label: t.detail.fcMeds, icon: '💊' },
-  ];
-
+  // Final check - items from user's checklist (default: Essentials category, editable)
+  const [finalCheckItemIds, setFinalCheckItemIds] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(`finalcheck_items_${id}`);
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return []; // will be initialized with Essentials category on first load
+  });
+  
+  const [showFinalCheckEditor, setShowFinalCheckEditor] = useState(false);
   const [finalCheckState, setFinalCheckState] = useState<Record<string, boolean>>(() => {
     try {
-      const saved = localStorage.getItem(`finalcheck_${id}`);
+      const saved = localStorage.getItem(`finalcheck_state_${id}`);
       return saved ? JSON.parse(saved) : {};
     } catch {
       return {};
     }
   });
 
+  // Auto-initialize with Essentials + Documents category items on first load
+  useEffect(() => {
+    if (items.length > 0 && finalCheckItemIds.length === 0) {
+      const finalItems = items.filter(
+        item => 
+          item.categoryId === 'Essentials' || 
+          item.categoryId.toLowerCase().includes('essential') ||
+          item.categoryId === 'Documents' ||
+          item.categoryId.toLowerCase().includes('document')
+      );
+      if (finalItems.length > 0) {
+        const ids = finalItems.map(i => i.id);
+        setFinalCheckItemIds(ids);
+        try {
+          localStorage.setItem(`finalcheck_items_${id}`, JSON.stringify(ids));
+        } catch {}
+      }
+    }
+  }, [items, finalCheckItemIds.length, id]);
+
+  const finalCheckItems = items
+    .filter(item => finalCheckItemIds.includes(item.id))
+    .map(item => ({
+      id: item.id,
+      label: item.isTemplateItem ? getTranslatedItemName(item.name, lang) : item.name,
+      icon: getCategoryIcon(item.categoryId),
+    }));
+
   const toggleFinalCheck = (itemId: string) => {
     setFinalCheckState(prev => {
       const next = { ...prev, [itemId]: !prev[itemId] };
       try {
-        localStorage.setItem(`finalcheck_${id}`, JSON.stringify(next));
+        localStorage.setItem(`finalcheck_state_${id}`, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const toggleFinalCheckItem = (itemId: string) => {
+    setFinalCheckItemIds(prev => {
+      const next = prev.includes(itemId)
+        ? prev.filter(id => id !== itemId)
+        : [...prev, itemId];
+      try {
+        localStorage.setItem(`finalcheck_items_${id}`, JSON.stringify(next));
       } catch {}
       return next;
     });
   };
 
   const daysUntil = checklist?.departureDate ? getDaysUntil(checklist.departureDate) : null;
-  const showFinalCheck = daysUntil !== null && daysUntil <= 1 && daysUntil >= 0;
+  const showFinalCheck = daysUntil !== null && daysUntil <= 1 && daysUntil >= 0 && finalCheckItems.length > 0;
   const finalCheckProgress = {
-    checked: Object.values(finalCheckState).filter(Boolean).length,
+    checked: finalCheckItems.filter(item => finalCheckState[item.id]).length,
     total: finalCheckItems.length,
   };
 
-  // Recommended items (mixed: user frequency + preset)
+  // Recommended items - based on user's real history, empty if no history
   const currentItemNames = items.map(i => i.name);
-  const recommendedItems = getRecommendedItems([], currentItemNames, 8);
+  const recommendedItems = getRecommendedItems(allHistoryItems, currentItemNames, 8);
 
   const handleQuickAddItem = async (name: string, category: string) => {
     await addItem(name, category, 1);
@@ -452,14 +501,16 @@ function ChecklistDetail() {
   const openAddBag = () => {
     setNewBagName('');
     setNewBagIcon('🧳');
+    setNewBagIconImage(undefined);
     setShowAddBag(true);
   };
 
   const handleAddBag = async () => {
     if (!newBagName.trim()) return;
-    await addBag(newBagName.trim(), newBagIcon);
+    await addBag(newBagName.trim(), newBagIcon, undefined, newBagIconImage);
     setNewBagName('');
     setNewBagIcon('🧳');
+    setNewBagIconImage(undefined);
     setShowAddBag(false);
   };
 
@@ -467,6 +518,7 @@ function ChecklistDetail() {
     setEditingBag(bag);
     setNewBagName(bag.name);
     setNewBagIcon(bag.icon);
+    setNewBagIconImage(bag.iconImage);
   };
 
   const handleEditBag = async () => {
@@ -475,9 +527,75 @@ function ChecklistDetail() {
       ...editingBag,
       name: newBagName.trim(),
       icon: newBagIcon,
+      iconImage: newBagIconImage,
       updatedAt: Date.now(),
     });
     setEditingBag(null);
+  };
+
+  // Handle image upload for bag icon
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      // Compress image to avoid huge base64 strings
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxSize = 128;
+        let { width, height } = img;
+        if (width > height) {
+          if (width > maxSize) {
+            height = (height * maxSize) / width;
+            width = maxSize;
+          }
+        } else {
+          if (height > maxSize) {
+            width = (width * maxSize) / height;
+            height = maxSize;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressed = canvas.toDataURL('image/webp', 0.8);
+          setNewBagIconImage(compressed);
+        }
+      };
+      img.src = result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Remove custom image, revert to emoji
+  const removeCustomImage = () => {
+    setNewBagIconImage(undefined);
+  };
+
+  // View bag details
+  const openBagDetail = (bag: Bag) => {
+    setViewingBag(bag);
+  };
+
+  // Remove item from bag (unassign)
+  const handleRemoveFromBag = async (item: ChecklistItem) => {
+    await assignItemToBag(item, null);
+  };
+
+  // Move item to another bag
+  const openMoveItem = (item: ChecklistItem) => {
+    setMovingItem(item);
+  };
+
+  const handleMoveItem = async (bagId: string | null) => {
+    if (!movingItem) return;
+    await assignItemToBag(movingItem, bagId);
+    setMovingItem(null);
   };
 
   const handleDeleteBag = async (bag: Bag) => {
@@ -554,6 +672,83 @@ function ChecklistDetail() {
   };
   // Keep for future use (drop zone for unassigned items)
   void handleDropUnassigned;
+
+  // ============================================
+  // Mobile Touch Drag & Drop handlers
+  // ============================================
+
+  const handleTouchStart = (e: React.TouchEvent, item: ChecklistItem) => {
+    if (bags.length === 0) return;
+    const touch = e.touches[0];
+    longPressTimerRef.current = setTimeout(() => {
+      setTouchDragging(true);
+      setTouchDragItemId(item.id);
+      touchDragItemRef.current = item;
+      setTouchDragPos({ x: touch.clientX, y: touch.clientY });
+      // Haptic feedback if available
+      if (navigator.vibrate) navigator.vibrate(50);
+    }, 300);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchDragging) {
+      // Cancel long press if user moves finger before it triggers
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      return;
+    }
+    e.preventDefault();
+    const touch = e.touches[0];
+    setTouchDragPos({ x: touch.clientX, y: touch.clientY });
+
+    // Check which bag is under the finger
+    const bagEls = document.querySelectorAll('[data-bag-id]');
+    let foundBag: string | null = null;
+    bagEls.forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (
+        touch.clientX >= rect.left &&
+        touch.clientX <= rect.right &&
+        touch.clientY >= rect.top &&
+        touch.clientY <= rect.bottom
+      ) {
+        foundBag = el.getAttribute('data-bag-id');
+      }
+    });
+    
+    if (foundBag !== dragOverBagId) {
+      setDragOverBagId(foundBag);
+    }
+  };
+
+  const handleTouchEnd = async () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    
+    if (touchDragging && touchDragItemRef.current && dragOverBagId) {
+      await assignItemToBag(touchDragItemRef.current, dragOverBagId);
+    }
+    
+    setTouchDragging(false);
+    setTouchDragItemId(null);
+    setDragOverBagId(null);
+    touchDragItemRef.current = null;
+  };
+
+  const handleTouchCancel = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    setTouchDragging(false);
+    setTouchDragItemId(null);
+    setDragOverBagId(null);
+    touchDragItemRef.current = null;
+  };
 
   const openAddItem = () => {
     if (categories.length > 0) {
@@ -656,6 +851,29 @@ function ChecklistDetail() {
     setShowShareSheet(false);
   };
 
+  const [exportingPDF, setExportingPDF] = useState(false);
+  const handleExportPDF = async () => {
+    if (!checklist || exportingPDF) return;
+    setExportingPDF(true);
+    try {
+      const { exportChecklistPDF } = await import('../utils/exportPDF');
+      await exportChecklistPDF({
+        checklist,
+        items,
+        bags,
+        finalCheckItems,
+        finalCheckState,
+        lang,
+        t,
+      });
+    } catch (error) {
+      console.error('Failed to export PDF:', error);
+    } finally {
+      setExportingPDF(false);
+      setShowShareSheet(false);
+    }
+  };
+
   const handleShareNative = async () => {
     if (!navigator.share) {
       handleCopyText();
@@ -714,13 +932,13 @@ function ChecklistDetail() {
           <div className="animate-celebration text-center relative">
             <div className="text-8xl mb-4 animate-bounce">🎉</div>
             <div className="bg-white rounded-3xl px-10 py-8 shadow-2xl">
-              <h2 className="text-3xl font-bold text-gray-900 mb-2">All Packed!</h2>
-              <p className="text-gray-500 text-lg">You're ready to go ✨</p>
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">{t.detail.allDone}</h2>
+              <p className="text-gray-500 text-lg">{t.detail.allDoneDesc}</p>
               <button
                 onClick={() => setShowCelebration(false)}
                 className="mt-6 text-primary-500 font-semibold hover:text-primary-600 transition-colors"
               >
-                Got it
+                {t.detail.gotIt}
               </button>
             </div>
           </div>
@@ -927,9 +1145,9 @@ function ChecklistDetail() {
             <div className="flex-shrink-0 mb-3">
               <div className="bg-success-50 border border-success-100 rounded-2xl p-4 text-center">
                 <div className="text-3xl mb-1">🎉</div>
-                <h2 className="text-base font-bold text-gray-900">You're all packed!</h2>
+                <h2 className="text-base font-bold text-gray-900">{t.detail.allPackedTitle}</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Everything on your checklist has been prepared.
+                  {t.detail.allPackedDesc}
                 </p>
               </div>
             </div>
@@ -949,6 +1167,16 @@ function ChecklistDetail() {
                       {daysUntil === 0 ? t.detail.fcDepartureDay : t.detail.fcLeavingTomorrow}
                     </p>
                   </div>
+                  <button
+                    onClick={() => setShowFinalCheckEditor(true)}
+                    className="p-1.5 text-amber-600 hover:bg-amber-100 rounded-lg transition-colors"
+                    aria-label="Edit final check items"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                    </svg>
+                  </button>
                   <div className="text-right">
                     <span className="text-base font-bold text-amber-600">
                       {finalCheckProgress.checked}/{finalCheckProgress.total}
@@ -968,13 +1196,13 @@ function ChecklistDetail() {
                       }`}
                     >
                       <span className="text-base">{item.icon}</span>
-                      <span className={`text-xs font-medium flex-1 ${
+                      <span className={`text-xs font-medium flex-1 truncate ${
                         finalCheckState[item.id] ? 'text-success-700 line-through opacity-70' : 'text-gray-700'
                       }`}>
                         {item.label}
                       </span>
                       {finalCheckState[item.id] && (
-                        <span className="text-success-500 text-sm">✓</span>
+                        <span className="text-success-500 text-sm flex-shrink-0">✓</span>
                       )}
                     </button>
                   ))}
@@ -1044,11 +1272,17 @@ function ChecklistDetail() {
                         <div
                           key={item.id}
                           className={`bg-white rounded-lg shadow-sm border border-surface-100 flex items-center gap-2.5 px-2.5 py-2 transition-all ${
-                            draggedItemId === item.id ? 'opacity-50 bg-primary-50 scale-[0.98]' : 'hover:shadow-md hover:border-primary-200'
+                            draggedItemId === item.id || touchDragItemId === item.id 
+                              ? 'opacity-50 bg-primary-50 scale-[0.98]' 
+                              : 'hover:shadow-md hover:border-primary-200'
                           }`}
                           draggable={bags.length > 0 ? true : undefined}
                           onDragStart={(e) => handleDragStart(e, item.id)}
                           onDragEnd={handleDragEnd}
+                          onTouchStart={(e) => handleTouchStart(e, item)}
+                          onTouchMove={handleTouchMove}
+                          onTouchEnd={handleTouchEnd}
+                          onTouchCancel={handleTouchCancel}
                         >
                           {/* Category Icon */}
                           <div className={`w-9 h-9 rounded-lg ${catColor.bg} ${catColor.border} border flex items-center justify-center text-base flex-shrink-0`}>
@@ -1173,14 +1407,15 @@ function ChecklistDetail() {
                   return (
                     <div
                       key={bag.id}
+                      data-bag-id={bag.id}
                       className={`flex-shrink-0 w-28 rounded-xl transition-all duration-200 cursor-pointer overflow-hidden ${
                         isDragOver
                           ? 'bg-primary-500 text-white scale-105 shadow-xl ring-2 ring-primary-300'
-                          : isDraggingAny
+                          : isDraggingAny || touchDragging
                             ? 'bg-white shadow-lg border-2 border-primary-300 scale-[1.02]'
                             : 'bg-white shadow-md border border-surface-200 hover:shadow-lg hover:border-primary-200'
                       }`}
-                      onClick={() => openEditBag(bag)}
+                      onClick={() => openBagDetail(bag)}
                       onDragOver={(e) => handleDragOver(e, bag.id)}
                       onDragLeave={handleDragLeave}
                       onDrop={(e) => handleDrop(e, bag.id)}
@@ -1190,9 +1425,17 @@ function ChecklistDetail() {
                         isDragOver ? 'bg-primary-400/30' : 'bg-surface-50'
                       }`}>
                         <div className="relative">
-                          <span className={`text-3xl transition-transform ${isDragOver ? 'scale-110 animate-bounce' : ''}`}>
-                            {bag.icon}
-                          </span>
+                          {bag.iconImage ? (
+                            <img 
+                              src={bag.iconImage} 
+                              alt={bag.name}
+                              className={`w-10 h-10 object-cover rounded-lg transition-transform ${isDragOver ? 'scale-110' : ''}`}
+                            />
+                          ) : (
+                            <span className={`text-3xl transition-transform ${isDragOver ? 'scale-110 animate-bounce' : ''}`}>
+                              {bag.icon}
+                            </span>
+                          )}
                           {/* 3D effect shadow */}
                           <div className={`absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-6 h-1 rounded-full blur-sm ${
                             isDragOver ? 'bg-primary-700/20' : 'bg-gray-300/40'
@@ -1247,6 +1490,99 @@ function ChecklistDetail() {
         </button>
       )}
 
+      {/* Final Check Editor Bottom Sheet */}
+      {showFinalCheckEditor && (
+        <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-[60] animate-fade-in" onClick={() => setShowFinalCheckEditor(false)}>
+          <div className="w-full max-w-md bg-white rounded-t-3xl animate-slide-up flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
+            <div className="px-6 pt-5 pb-4 border-b border-surface-100 flex items-center justify-between flex-shrink-0">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Edit Final Check</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {finalCheckItemIds.length} items selected
+                </p>
+              </div>
+              <button
+                onClick={() => setShowFinalCheckEditor(false)}
+                className="p-2 -mr-2 text-gray-400 hover:text-gray-600 hover:bg-surface-100 rounded-xl transition-colors"
+                aria-label="Close"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <p className="text-xs text-gray-500 mb-3">
+                Tap items to add them to your Final Check list. These are the essentials you'll double-check before leaving.
+              </p>
+              
+              {/* Items grouped by category */}
+              {categories.map(cat => {
+                const catItems = items.filter(i => i.categoryId === cat.name);
+                if (catItems.length === 0) return null;
+                const catColor = getCategoryColor(cat.name);
+                const catIcon = getCategoryIcon(cat.name);
+                return (
+                  <div key={cat.name} className="mb-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className={`w-6 h-6 rounded-lg ${catColor.bg} ${catColor.border} border flex items-center justify-center text-xs`}>
+                        {catIcon}
+                      </div>
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                        {getTranslatedCategory(cat.name, lang)}
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {catItems.map(item => {
+                        const isSelected = finalCheckItemIds.includes(item.id);
+                        const itemName = item.isTemplateItem ? getTranslatedItemName(item.name, lang) : item.name;
+                        return (
+                          <button
+                            key={item.id}
+                            onClick={() => toggleFinalCheckItem(item.id)}
+                            className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
+                              isSelected
+                                ? 'bg-amber-50 border border-amber-200'
+                                : 'bg-surface-50 border border-transparent hover:border-surface-200'
+                            }`}
+                          >
+                            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all ${
+                              isSelected ? 'bg-amber-500 border-amber-500' : 'border-surface-300'
+                            }`}>
+                              {isSelected && (
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </div>
+                            <span className={`text-sm flex-1 truncate ${
+                              isSelected ? 'text-amber-900 font-medium' : 'text-gray-700'
+                            }`}>
+                              {itemName}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            
+            <div className="px-6 py-4 border-t border-surface-100 flex-shrink-0">
+              <button
+                onClick={() => setShowFinalCheckEditor(false)}
+                className="w-full py-3 bg-amber-500 text-white rounded-2xl font-bold hover:bg-amber-600 transition-colors shadow-sm"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add Bag Bottom Sheet */}
       {showAddBag && (
         <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-[60] animate-fade-in" onClick={() => setShowAddBag(false)}>
@@ -1272,13 +1608,44 @@ function ChecklistDetail() {
                 <label className="block text-sm font-medium text-gray-700 mb-3">
                   Choose Icon
                 </label>
+                {/* Custom image preview / upload */}
+                <div className="mb-4">
+                  {newBagIconImage ? (
+                    <div className="flex items-center gap-3">
+                      <img 
+                        src={newBagIconImage} 
+                        alt="Custom icon"
+                        className="w-14 h-14 object-cover rounded-xl border-2 border-primary-400"
+                      />
+                      <button
+                        onClick={removeCustomImage}
+                        className="text-sm text-red-500 font-medium hover:text-red-600"
+                      >
+                        Remove Image
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex items-center justify-center gap-2 w-full py-3 border-2 border-dashed border-gray-200 rounded-xl cursor-pointer hover:bg-surface-50 hover:border-primary-300 transition-all">
+                      <span className="text-xl">📷</span>
+                      <span className="text-sm text-gray-600">Upload Custom Image</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  )}
+                </div>
+                {/* Emoji icons */}
+                <p className="text-xs text-gray-400 mb-2">Or choose an emoji:</p>
                 <div className="grid grid-cols-4 gap-3">
                   {BAG_ICONS.map(icon => (
                     <button
                       key={icon}
-                      onClick={() => setNewBagIcon(icon)}
+                      onClick={() => { setNewBagIcon(icon); setNewBagIconImage(undefined); }}
                       className={`aspect-square rounded-xl text-2xl flex items-center justify-center transition-all ${
-                        newBagIcon === icon
+                        newBagIcon === icon && !newBagIconImage
                           ? 'bg-primary-50 border-2 border-primary-400 scale-105'
                           : 'bg-surface-50 border-2 border-transparent hover:bg-surface-100'
                       }`}
@@ -1327,13 +1694,44 @@ function ChecklistDetail() {
                 <label className="block text-sm font-medium text-gray-700 mb-3">
                   Choose Icon
                 </label>
+                {/* Custom image preview / upload */}
+                <div className="mb-4">
+                  {newBagIconImage ? (
+                    <div className="flex items-center gap-3">
+                      <img 
+                        src={newBagIconImage} 
+                        alt="Custom icon"
+                        className="w-14 h-14 object-cover rounded-xl border-2 border-primary-400"
+                      />
+                      <button
+                        onClick={removeCustomImage}
+                        className="text-sm text-red-500 font-medium hover:text-red-600"
+                      >
+                        Remove Image
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex items-center justify-center gap-2 w-full py-3 border-2 border-dashed border-gray-200 rounded-xl cursor-pointer hover:bg-surface-50 hover:border-primary-300 transition-all">
+                      <span className="text-xl">📷</span>
+                      <span className="text-sm text-gray-600">Upload Custom Image</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  )}
+                </div>
+                {/* Emoji icons */}
+                <p className="text-xs text-gray-400 mb-2">Or choose an emoji:</p>
                 <div className="grid grid-cols-4 gap-3">
                   {BAG_ICONS.map(icon => (
                     <button
                       key={icon}
-                      onClick={() => setNewBagIcon(icon)}
+                      onClick={() => { setNewBagIcon(icon); setNewBagIconImage(undefined); }}
                       className={`aspect-square rounded-xl text-2xl flex items-center justify-center transition-all ${
-                        newBagIcon === icon
+                        newBagIcon === icon && !newBagIconImage
                           ? 'bg-primary-50 border-2 border-primary-400 scale-105'
                           : 'bg-surface-50 border-2 border-transparent hover:bg-surface-100'
                       }`}
@@ -1364,6 +1762,165 @@ function ChecklistDetail() {
                 disabled={!newBagName.trim()}
               >
                 Save Changes
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bag Detail Bottom Sheet */}
+      {viewingBag && (
+        <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-[60] animate-fade-in" onClick={() => setViewingBag(null)}>
+          <div className="w-full max-w-md bg-white rounded-t-3xl animate-slide-up flex flex-col max-h-[80vh]" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="px-6 pt-5 pb-4 border-b border-surface-100 flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-3">
+                {viewingBag.iconImage ? (
+                  <img src={viewingBag.iconImage} alt="" className="w-10 h-10 rounded-lg object-cover" />
+                ) : (
+                  <span className="text-3xl">{viewingBag.icon}</span>
+                )}
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">{viewingBag.name}</h3>
+                  <p className="text-xs text-gray-500">
+                    {items.filter(i => i.bagId === viewingBag.id).length} items
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => { setViewingBag(null); openEditBag(viewingBag); }}
+                className="p-2 text-gray-500 hover:text-gray-700 hover:bg-surface-100 rounded-lg transition-colors"
+              >
+                ✏️
+              </button>
+            </div>
+            
+            {/* Item list */}
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {(() => {
+                const bagItems = items.filter(i => i.bagId === viewingBag.id);
+                if (bagItems.length === 0) {
+                  return (
+                    <div className="text-center py-10">
+                      <div className="text-4xl mb-3">📦</div>
+                      <p className="text-gray-500 text-sm">No items in this bag yet</p>
+                      <p className="text-gray-400 text-xs mt-1">Drag items here to pack them</p>
+                    </div>
+                  );
+                }
+                return bagItems.map(item => {
+                  const catColor = getCategoryColor(categories.find(c => c.id === item.categoryId)?.name || '');
+                  const catIcon = getCategoryIcon(item.categoryId);
+                  return (
+                    <div
+                      key={item.id}
+                      className="bg-surface-50 rounded-xl flex items-center gap-3 px-3 py-2.5"
+                    >
+                      {/* Category Icon */}
+                      <div className={`w-8 h-8 rounded-lg ${catColor.bg} ${catColor.border} border flex items-center justify-center text-sm flex-shrink-0`}>
+                        {catIcon}
+                      </div>
+                      
+                      {/* Item Info */}
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-medium truncate ${item.packed ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                          {item.isTemplateItem ? getTranslatedItemName(item.name, lang) : item.name}
+                        </p>
+                        {item.quantity > 1 && (
+                          <p className="text-xs text-gray-400">×{item.quantity}</p>
+                        )}
+                      </div>
+                      
+                      {/* Actions */}
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <button
+                          onClick={() => openMoveItem(item)}
+                          className="p-1.5 text-gray-400 hover:text-primary-500 hover:bg-primary-50 rounded-lg transition-colors"
+                          title="Move to another bag"
+                        >
+                          <span className="text-base">↔️</span>
+                        </button>
+                        <button
+                          onClick={() => handleRemoveFromBag(item)}
+                          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          title="Remove from bag"
+                        >
+                          <span className="text-base">✕</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-surface-100 flex-shrink-0 safe-area-bottom">
+              <Button
+                variant="secondary"
+                fullWidth
+                onClick={() => setViewingBag(null)}
+              >
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move Item to Bag Bottom Sheet */}
+      {movingItem && (
+        <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-[70] animate-fade-in" onClick={() => setMovingItem(null)}>
+          <div className="w-full max-w-md bg-white rounded-t-3xl animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="px-6 pt-5 pb-4 border-b border-surface-100">
+              <h3 className="text-lg font-bold text-gray-900">Move to Bag</h3>
+              <p className="text-sm text-gray-500 mt-1">"{movingItem.isTemplateItem ? getTranslatedItemName(movingItem.name, lang) : movingItem.name}"</p>
+            </div>
+            <div className="px-4 py-3 space-y-2 max-h-[60vh] overflow-y-auto">
+              {/* Not packed option */}
+              <button
+                onClick={() => handleMoveItem(null)}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-surface-50 hover:bg-surface-100 transition-colors"
+              >
+                <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center text-xl">
+                  📤
+                </div>
+                <span className="text-sm font-medium text-gray-700">Not packed yet</span>
+              </button>
+              
+              {/* Bag list */}
+              {bags.filter(b => b.id !== movingItem.bagId).map(bag => (
+                <button
+                  key={bag.id}
+                  onClick={() => handleMoveItem(bag.id)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl bg-surface-50 hover:bg-surface-100 transition-colors"
+                >
+                  {bag.iconImage ? (
+                    <img src={bag.iconImage} alt="" className="w-10 h-10 rounded-xl object-cover" />
+                  ) : (
+                    <div className="w-10 h-10 rounded-xl bg-primary-50 flex items-center justify-center text-xl">
+                      {bag.icon}
+                    </div>
+                  )}
+                  <div className="text-left flex-1">
+                    <p className="text-sm font-medium text-gray-900">{bag.name}</p>
+                    <p className="text-xs text-gray-400">
+                      {items.filter(i => i.bagId === bag.id).length} items
+                    </p>
+                  </div>
+                </button>
+              ))}
+              {bags.filter(b => b.id !== movingItem.bagId).length === 0 && movingItem.bagId && (
+                <p className="text-center text-sm text-gray-400 py-4">No other bags available</p>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-surface-100 safe-area-bottom">
+              <Button
+                variant="secondary"
+                fullWidth
+                onClick={() => setMovingItem(null)}
+              >
+                Cancel
               </Button>
             </div>
           </div>
@@ -1476,6 +2033,28 @@ function ChecklistDetail() {
                 Cancel
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile drag preview - floating item following finger */}
+      {touchDragging && touchDragItemRef.current && (
+        <div 
+          className="fixed pointer-events-none z-[100] opacity-80 scale-105"
+          style={{
+            left: touchDragPos.x - 60,
+            top: touchDragPos.y - 24,
+          }}
+        >
+          <div className="bg-white rounded-lg shadow-xl border-2 border-primary-300 flex items-center gap-2 px-3 py-2">
+            <span className="text-lg">
+              {getCategoryIcon(touchDragItemRef.current.categoryId)}
+            </span>
+            <span className="text-sm font-medium text-gray-900 truncate max-w-[120px]">
+              {touchDragItemRef.current.isTemplateItem 
+                ? getTranslatedItemName(touchDragItemRef.current.name, lang) 
+                : touchDragItemRef.current.name}
+            </span>
           </div>
         </div>
       )}
@@ -1767,6 +2346,26 @@ function ChecklistDetail() {
                   <p className="text-sm text-gray-500">
                     {copied ? t.share.copiedDesc : t.share.copyTextDesc}
                   </p>
+                </div>
+                <span className="text-gray-400">›</span>
+              </button>
+
+              {/* Export PDF */}
+              <button
+                onClick={handleExportPDF}
+                disabled={exportingPDF}
+                className="w-full p-4 rounded-xl text-left transition-all flex items-center gap-4 bg-surface-50 border-2 border-transparent hover:bg-primary-50 hover:border-primary-200 disabled:opacity-50"
+              >
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl transition-all ${
+                  exportingPDF ? 'bg-primary-100 animate-pulse' : 'bg-primary-100'
+                }`}>
+                  {exportingPDF ? '⏳' : '📑'}
+                </div>
+                <div className="flex-1">
+                  <p className="font-semibold text-gray-900">
+                    {exportingPDF ? t.share.exportingPDF : t.share.exportPDF}
+                  </p>
+                  <p className="text-sm text-gray-500">{t.share.exportPDFDesc}</p>
                 </div>
                 <span className="text-gray-400">›</span>
               </button>

@@ -40,6 +40,7 @@ export interface Bag {
   checklistId: string;
   name: string;
   icon: string; // emoji like 🧳, 🎒, 👜
+  iconImage?: string; // base64 image data (optional, overrides emoji icon)
   order: number;
   color?: string;
   createdAt: number;
